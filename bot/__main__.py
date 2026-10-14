@@ -1,0 +1,40 @@
+import asyncio
+import logging
+
+from aiogram import Bot, Dispatcher
+from aiogram.client.default import DefaultBotProperties
+from aiogram.enums import ParseMode
+
+from bot import drive
+from bot.config import load_settings
+from bot.handlers import build_router
+from bot.storage import Storage
+
+
+async def main() -> None:
+    logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
+    settings = load_settings()
+    storage = Storage(settings.db_path)
+
+    bot = Bot(settings.bot_token, default=DefaultBotProperties(parse_mode=ParseMode.HTML))
+    dp = Dispatcher(settings=settings, storage_db=storage)
+    dp.include_router(build_router())
+
+    try:
+        await drive.sync_folder(storage, settings.drive_folder_id)
+    except Exception:
+        logging.exception("Перша синхронізація з Google Диском не вдалася")
+    sync_task = asyncio.create_task(
+        drive.sync_forever(storage, settings.drive_folder_id, settings.drive_sync_minutes)
+    )
+
+    try:
+        await dp.start_polling(bot)
+    finally:
+        sync_task.cancel()
+        storage.close()
+        await bot.session.close()
+
+
+if __name__ == "__main__":
+    asyncio.run(main())
