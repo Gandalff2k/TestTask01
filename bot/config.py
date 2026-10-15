@@ -14,10 +14,12 @@ class Settings:
     bot_token: str
     groq_api_key: str
     groq_model: str
+    groq_fallback_model: str
     drive_folder_id: str
     drive_sync_minutes: int
     data_dir: Path
     timezone: str
+    throttle_seconds: float
 
     @property
     def db_path(self) -> Path:
@@ -38,8 +40,10 @@ def load_settings() -> Settings:
         bot_token=_required("BOT_TOKEN"),
         groq_api_key=_required("GROQ_API_KEY"),
         groq_model=os.getenv("GROQ_MODEL", "openai/gpt-oss-120b"),
+        groq_fallback_model=os.getenv("GROQ_FALLBACK_MODEL", "openai/gpt-oss-20b"),
         drive_folder_id=os.getenv("DRIVE_FOLDER_ID", DEFAULT_DRIVE_FOLDER_ID),
         drive_sync_minutes=int(os.getenv("DRIVE_SYNC_MINUTES", "30")),
         data_dir=data_dir,
         timezone=os.getenv("TZ_NAME", "Europe/Kyiv"),
+        throttle_seconds=float(os.getenv("THROTTLE_SECONDS", "5")),
     )

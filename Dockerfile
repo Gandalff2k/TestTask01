@@ -12,4 +12,7 @@ RUN pip install --no-cache-dir -r requirements.txt
 
 COPY bot ./bot
 
+RUN useradd --create-home --uid 1000 bot && mkdir -p /app/data && chown bot:bot /app/data
+USER bot
+
 CMD ["python", "-m", "bot"]

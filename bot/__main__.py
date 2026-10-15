@@ -10,6 +10,7 @@ from bot.config import load_settings
 from bot.handlers import build_router
 from bot.llm import LLM
 from bot.storage import Storage
+from bot.throttle import ThrottleMiddleware
 
 
 async def main() -> None:
@@ -18,8 +19,11 @@ async def main() -> None:
     storage = Storage(settings.db_path)
 
     bot = Bot(settings.bot_token, default=DefaultBotProperties(parse_mode=ParseMode.HTML))
-    llm = LLM(settings.groq_api_key, settings.groq_model, settings.timezone)
+    llm = LLM(settings.groq_api_key, settings.groq_model, settings.groq_fallback_model, settings.timezone)
     dp = Dispatcher(settings=settings, storage_db=storage, llm=llm)
+    throttle = ThrottleMiddleware(settings.throttle_seconds)
+    dp.message.middleware(throttle)
+    dp.callback_query.middleware(throttle)
     dp.include_router(build_router())
 
     try:

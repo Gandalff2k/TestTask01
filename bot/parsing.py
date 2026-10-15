@@ -12,6 +12,7 @@ _MIN_TEXT_CHARS = 20
 _OCR_DPI = 400
 _OCR_LANG = "ukr"
 _OCR_THRESHOLD = 110
+MAX_PDF_PAGES = 20
 _WORD = re.compile(r"[А-ЩЬЮЯҐЄІЇа-щьюяґєії'’]{4,}")
 
 
@@ -20,6 +21,10 @@ class UnsupportedFormatError(Exception):
 
 
 class EmptyDocumentError(Exception):
+    pass
+
+
+class TooManyPagesError(Exception):
     pass
 
 
@@ -64,6 +69,8 @@ def _from_docx(data: bytes) -> str:
 def _from_pdf(data: bytes) -> str:
     pages: list[str] = []
     with pymupdf.open(stream=data, filetype="pdf") as pdf:
+        if pdf.page_count > MAX_PDF_PAGES:
+            raise TooManyPagesError(pdf.page_count)
         for page in pdf:
             text = page.get_text()
             if len(text.strip()) < _MIN_TEXT_CHARS:
