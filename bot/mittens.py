@@ -93,6 +93,30 @@ def doc_type_from_title(title: str) -> str:
     return " ".join(name.split())
 
 
+_GROUP_CUES: dict[str, re.Pattern] = {
+    "хвойний ліс": re.compile(r"хвойн|\b(?:під|серед|між|біля)\s+(?:ялинами|ялин|соснами|сосен|сосон)\b", re.I),
+    "листяний ліс": re.compile(r"листян|\b(?:під|серед|між|біля)\s+(?:дубами|дубів|грабами|березами|беріз)\b", re.I),
+    "біля річки": re.compile(r"річк|\bбіля\s+води\b", re.I),
+}
+
+
+def verify_scope(scope: frozenset[str], text: str) -> frozenset[str]:
+    if not scope or scope == ALL_MITTENS:
+        return scope
+    lowered = text.casefold()
+    keep = {m for m in scope if m.casefold() in lowered}
+    for group, members in GROUPS.items():
+        if members <= scope and _GROUP_CUES[group].search(text):
+            keep |= members
+    if keep:
+        return frozenset(keep)
+    cued: set[str] = set()
+    for group, cue in _GROUP_CUES.items():
+        if cue.search(text):
+            cued |= GROUPS[group]
+    return frozenset(cued)
+
+
 def describe_scope(scope: frozenset[str]) -> str:
     if scope == ALL_MITTENS:
         return FOREST

@@ -38,7 +38,14 @@ def docs_for(target: Target, docs: list[Document]) -> list[Document]:
     if target.is_mitten:
         (mitten,) = target.scope
         return [d for d in docs if mitten in d.scope]
-    return [d for d in docs if d.scope >= target.scope]
+    if target.is_forest:
+        return [d for d in docs if d.is_forest_wide]
+    return [d for d in docs if d.scope >= target.scope or d.scope <= target.scope]
+
+
+def select_by_type(target: Target, doc_types: list[str], docs: list[Document]) -> list[Document]:
+    wanted = set(doc_types)
+    return [d for d in docs_for(target, docs) if d.doc_type in wanted]
 
 
 def catalog(docs: list[Document]) -> dict[str, str]:

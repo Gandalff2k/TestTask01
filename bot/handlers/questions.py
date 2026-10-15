@@ -1,13 +1,14 @@
+import asyncio
 import html
 import logging
 from zoneinfo import ZoneInfo
 
 import groq
 from aiogram import F, Router
-from aiogram.enums import ChatAction
 from aiogram.filters import StateFilter
 from aiogram.fsm.context import FSMContext
 from aiogram.types import BufferedInputFile, CallbackQuery, Message
+from aiogram.utils.chat_action import ChatActionSender
 
 from bot import drive
 from bot.config import Settings
@@ -16,6 +17,7 @@ from bot.llm import LLM
 from bot.mittens import MITTENS
 from bot.retrieval import (
     EVERYWHERE_TARGET, FOREST_TARGET, Target, catalog, group_target, has_local_versions, mitten_target, select,
+    select_by_type,
 )
 from bot.storage import Document, Storage
 
@@ -23,26 +25,28 @@ log = logging.getLogger(__name__)
 router = Router(name="questions")
 
 OFF_TOPIC = (
-    "Я допомагаю лише з порадами звірів нашого лісу 🐭 "
+    "Я допомагаю лише з порадами звірів нашого лісу "
     "Спитай, наприклад, «скільки внесок під дубом?» або «які небезпеки біля річки?»."
 )
-BUSY = "Ой, забагато питань одразу — я не встигаю 🐭 Спробуй, будь ласка, за хвилинку."
+BUSY = "Ой, забагато питань одразу — я не встигаю  Спробуй, будь ласка, за хвилинку."
 FAILED = "Щось пішло не так, і я не змогла знайти відповідь. Спробуй, будь ласка, ще раз."
 LOADING = "Я ще розбираю «Лісовий архів». Спробуй за хвилинку."
 ASK_MITTEN = "Відповідь залежить від рукавички. Про яку питаєш?"
+ASK_MORE_LOCAL = "Є ще місцеві поради на цю тему. Обери рукавичку, якщо хочеш їх побачити:"
 _MAX_EVERYWHERE_DOCS = 12
+_MAX_ANSWER_CHARS = 3000
 
 
-@router.message(StateFilter(None), F.text, ~F.text.startswith("/"))
+@router.message(StateFilter(None), F.text, ~F.text.startswith("/"), flags={"throttle": True})
 async def on_question(message: Message, state: FSMContext, storage_db: Storage, llm: LLM, settings: Settings) -> None:
     question = message.text.strip()
     docs = storage_db.active()
     if not docs:
         await message.answer(LOADING)
         return
-    await message.bot.send_chat_action(message.chat.id, ChatAction.TYPING)
     try:
-        await _handle(message, state, question, docs, llm, settings)
+        async with ChatActionSender.typing(bot=message.bot, chat_id=message.chat.id):
+            await _handle(message, state, question, docs, llm, settings)
     except groq.RateLimitError:
         await message.answer(BUSY)
     except Exception:
@@ -50,7 +54,7 @@ async def on_question(message: Message, state: FSMContext, storage_db: Storage, 
         await message.answer(FAILED)
 
 
-@router.callback_query(MittenChoice.filter())
+@router.callback_query(MittenChoice.filter(), flags={"throttle": True})
 async def on_mitten_chosen(
     callback: CallbackQuery, callback_data: MittenChoice, state: FSMContext,
     storage_db: Storage, llm: LLM, settings: Settings,
@@ -62,10 +66,10 @@ async def on_mitten_chosen(
         await callback.message.answer("Нагадай, будь ласка, питання — я його вже забула.")
         return
     mitten = MITTENS[callback_data.index]
-    await callback.message.bot.send_chat_action(callback.message.chat.id, ChatAction.TYPING)
     try:
-        text = await _answer_for(question, mitten_target(mitten), data.get("pending_types") or [],
-                                 storage_db.active(), llm, settings, with_header=True)
+        async with ChatActionSender.typing(bot=callback.bot, chat_id=callback.message.chat.id):
+            text = await _answer_for(question, mitten_target(mitten), data.get("pending_types") or [],
+                                     storage_db.active(), llm, settings, with_header=True)
         await callback.message.answer(text)
     except groq.RateLimitError:
         await callback.message.answer(BUSY)
@@ -79,7 +83,7 @@ async def _handle(message: Message, state: FSMContext, question: str, docs: list
     route = await llm.route(question, catalog(docs))
     targets = [mitten_target(m) for m in route.mittens] + [group_target(g) for g in route.groups]
 
-    if route.off_topic and not targets and not route.unknown_places:
+    if route.off_topic and not targets and not route.unknown_places and not route.doc_types:
         await message.answer(OFF_TOPIC)
         return
 
@@ -96,9 +100,12 @@ async def _handle(message: Message, state: FSMContext, question: str, docs: list
         return
 
     if targets:
-        for target in targets:
-            await message.answer(await _answer_for(question, target, route.doc_types, docs, llm, settings,
-                                                   with_header=len(targets) > 1))
+        answers = await asyncio.gather(*(
+            _answer_for(question, t, route.doc_types, docs, llm, settings, with_header=len(targets) > 1)
+            for t in targets
+        ))
+        for text in answers:
+            await message.answer(text)
         return
 
     if route.all_mittens:
@@ -108,28 +115,29 @@ async def _handle(message: Message, state: FSMContext, question: str, docs: list
 
     forest_docs = select(FOREST_TARGET, route.doc_types, docs)
     needs_mitten = has_local_versions(route.doc_types, docs)
+    answered = False
     if forest_docs:
         answer = await llm.answer(question, FOREST_TARGET.label, forest_docs)
         if answer.found:
+            answered = True
             await message.answer(_format(answer.text, answer.used_doc_ids, docs, settings))
-        elif not needs_mitten:
-            await message.answer(_not_found(FOREST_TARGET))
-    elif not needs_mitten:
+    if not answered and not needs_mitten:
         await message.answer(_not_found(FOREST_TARGET))
     if needs_mitten:
         await state.update_data(pending_question=question, pending_types=route.doc_types)
-        await message.answer(ASK_MITTEN, reply_markup=mittens_keyboard())
+        await message.answer(ASK_MORE_LOCAL if answered else ASK_MITTEN, reply_markup=mittens_keyboard())
 
 
 async def _answer_for(question: str, target: Target, doc_types: list[str], docs: list[Document],
                       llm: LLM, settings: Settings, with_header: bool) -> str:
     header = f"<b>{html.escape(target.label)}</b>\n" if with_header else ""
     selected = select(target, doc_types, docs)
-    if target.everywhere:
+    if not target.is_mitten:
         selected = selected[:_MAX_EVERYWHERE_DOCS]
     if not selected:
         return header + _not_found(target)
-    answer = await llm.answer(question, target.label, selected, everywhere=target.everywhere)
+    answer = await llm.answer(question, target.label, selected, everywhere=target.everywhere,
+                              name_mittens=not target.is_mitten and not target.is_forest)
     if not answer.found:
         return header + _not_found(target)
     return header + _format(answer.text, answer.used_doc_ids, docs, settings)
@@ -146,6 +154,8 @@ def _not_found(target: Target) -> str:
 def _format(text: str, used_ids: list[int], docs: list[Document], settings: Settings) -> str:
     by_id = {d.id: d for d in docs}
     sources = [_source_line(by_id[i], settings) for i in used_ids if i in by_id]
+    if len(text) > _MAX_ANSWER_CHARS:
+        text = text[:_MAX_ANSWER_CHARS].rstrip() + "…"
     result = html.escape(text)
     if sources:
         result += "\n\n" + "\n".join(f"📄 {s}" for s in sources)
@@ -161,7 +171,7 @@ def _source_line(doc: Document, settings: Settings) -> str:
 
 
 async def _send_files(message: Message, targets: list[Target], doc_types: list[str], docs: list[Document]) -> None:
-    chosen = list({d.id: d for t in targets for d in select(t, doc_types, docs)}.values())
+    chosen = list({d.id: d for t in targets for d in select_by_type(t, doc_types, docs)}.values())
     if not chosen:
         await message.answer("Не знайшла такого документа. Подивись список командою /docs.")
         return
