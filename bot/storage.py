@@ -22,11 +22,20 @@ CREATE TABLE IF NOT EXISTS documents (
     author         TEXT,
     added_at       TEXT NOT NULL,          -- ISO-8601, UTC
     active         INTEGER NOT NULL DEFAULT 1,
+    is_supplement  INTEGER NOT NULL DEFAULT 0,
+    uploader_id    INTEGER,
+    removed        INTEGER NOT NULL DEFAULT 0,
     replaced_by    INTEGER REFERENCES documents(id)
 );
 CREATE INDEX IF NOT EXISTS idx_documents_active ON documents(active);
 CREATE INDEX IF NOT EXISTS idx_documents_drive_id ON documents(drive_id);
 """
+
+_MIGRATIONS = {
+    "is_supplement": "INTEGER NOT NULL DEFAULT 0",
+    "uploader_id": "INTEGER",
+    "removed": "INTEGER NOT NULL DEFAULT 0",
+}
 
 
 @dataclass(frozen=True)
@@ -45,6 +54,9 @@ class Document:
     author: str | None
     added_at: datetime
     active: bool
+    is_supplement: bool
+    uploader_id: int | None
+    removed: bool
     replaced_by: int | None
 
     @property
@@ -72,6 +84,9 @@ def _row_to_doc(row: sqlite3.Row) -> Document:
         author=row["author"],
         added_at=datetime.fromisoformat(row["added_at"]),
         active=bool(row["active"]),
+        is_supplement=bool(row["is_supplement"]),
+        uploader_id=row["uploader_id"],
+        removed=bool(row["removed"]),
         replaced_by=row["replaced_by"],
     )
 
@@ -81,6 +96,10 @@ class Storage:
         self._conn = sqlite3.connect(path)
         self._conn.row_factory = sqlite3.Row
         self._conn.executescript(SCHEMA)
+        columns = {r["name"] for r in self._conn.execute("PRAGMA table_info(documents)")}
+        for column, ddl in _MIGRATIONS.items():
+            if column not in columns:
+                self._conn.execute(f"ALTER TABLE documents ADD COLUMN {column} {ddl}")
 
     def close(self) -> None:
         self._conn.close()
@@ -100,23 +119,26 @@ class Storage:
         tg_file_id: str | None = None,
         author: str | None = None,
         added_at: datetime | None = None,
+        is_supplement: bool = False,
+        uploader_id: int | None = None,
     ) -> Document:
         added_at = added_at or _now()
         scope_json = json.dumps(sorted(scope), ensure_ascii=False)
         with self._conn:
             cur = self._conn.execute(
                 """INSERT INTO documents (title, doc_type, scope, source, filename, text,
-                       drive_id, drive_modified, content_hash, tg_file_id, author, added_at)
-                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                       drive_id, drive_modified, content_hash, tg_file_id, author, added_at, is_supplement, uploader_id)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                 (title, doc_type, scope_json, source, filename, text,
-                 drive_id, drive_modified, content_hash, tg_file_id, author, added_at.isoformat()),
+                 drive_id, drive_modified, content_hash, tg_file_id, author, added_at.isoformat(), int(is_supplement), uploader_id),
             )
             new_id = cur.lastrowid
-            self._conn.execute(
-                """UPDATE documents SET active = 0, replaced_by = ?
-                   WHERE active = 1 AND id != ? AND doc_type = ? AND scope = ?""",
-                (new_id, new_id, doc_type, scope_json),
-            )
+            if not is_supplement:
+                self._conn.execute(
+                    """UPDATE documents SET active = 0, replaced_by = ?
+                       WHERE active = 1 AND id != ? AND doc_type = ? AND scope = ?""",
+                    (new_id, new_id, doc_type, scope_json),
+                )
         return self.get(new_id)
 
     def get(self, doc_id: int) -> Document:
@@ -155,3 +177,30 @@ class Storage:
             for doc in gone:
                 self._conn.execute("UPDATE documents SET active = 0 WHERE id = ?", (doc.id,))
         return gone
+
+    def same_document(self, doc_type: str, scope: frozenset[str]) -> list[Document]:
+        return [d for d in self.active() if d.doc_type == doc_type and d.scope == scope]
+
+    def active_by_hash(self, content_hash: str) -> Document | None:
+        row = self._conn.execute(
+            "SELECT * FROM documents WHERE active = 1 AND content_hash = ? LIMIT 1", (content_hash,)
+        ).fetchone()
+        return _row_to_doc(row) if row else None
+
+    def uploaded_by(self, uploader_id: int) -> list[Document]:
+        rows = self._conn.execute(
+            "SELECT * FROM documents WHERE active = 1 AND source = 'telegram' AND uploader_id = ? ORDER BY id",
+            (uploader_id,),
+        )
+        return [_row_to_doc(r) for r in rows]
+
+    def remove(self, doc_id: int) -> list[Document]:
+        with self._conn:
+            self._conn.execute("UPDATE documents SET active = 0, removed = 1 WHERE id = ?", (doc_id,))
+            restored = self._conn.execute(
+                "SELECT id FROM documents WHERE replaced_by = ? AND removed = 0", (doc_id,)
+            ).fetchall()
+            self._conn.execute(
+                "UPDATE documents SET active = 1, replaced_by = NULL WHERE replaced_by = ? AND removed = 0", (doc_id,)
+            )
+        return [self.get(r["id"]) for r in restored]
