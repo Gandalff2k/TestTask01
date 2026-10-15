@@ -67,6 +67,11 @@ async def download(session: aiohttp.ClientSession, file_id: str) -> bytes:
         return await resp.read()
 
 
+async def fetch(file_id: str) -> bytes:
+    async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=60)) as session:
+        return await download(session, file_id)
+
+
 async def sync_folder(
     storage: Storage,
     folder_id: str,

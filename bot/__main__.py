@@ -8,6 +8,7 @@ from aiogram.enums import ParseMode
 from bot import drive
 from bot.config import load_settings
 from bot.handlers import build_router
+from bot.llm import LLM
 from bot.storage import Storage
 
 
@@ -17,7 +18,8 @@ async def main() -> None:
     storage = Storage(settings.db_path)
 
     bot = Bot(settings.bot_token, default=DefaultBotProperties(parse_mode=ParseMode.HTML))
-    dp = Dispatcher(settings=settings, storage_db=storage)
+    llm = LLM(settings.groq_api_key, settings.groq_model, settings.timezone)
+    dp = Dispatcher(settings=settings, storage_db=storage, llm=llm)
     dp.include_router(build_router())
 
     try:
