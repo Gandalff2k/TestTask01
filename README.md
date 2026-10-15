@@ -1,6 +1,6 @@
 # Mice bot
 
-Telegram bot that answers animals' questions using the documents of eight mittens .
+Telegram bot that answers animals' questions using the documents of eight mittens, specifications retrieved for mice bot in the Requirements.md.
 
 ## Start
 
